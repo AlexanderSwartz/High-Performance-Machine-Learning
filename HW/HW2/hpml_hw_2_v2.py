@@ -20,14 +20,14 @@ import numpy as np
 import time
 os.environ["WANDB_API_KEY"] = userdata.get('WANDB_API_KEY')
 wandb.init(project="hpml-hw2")
-wandb.run.name = "nw8_bs32_lr1e-4_epoch5_adamw_nocompile"
+wandb.run.name = "nw0_bs32_lr1e-4_epoch5_adamw_nocompile"
 wandb.config.update({
     "model_name": "distilbert-base-uncased",
     "max_len": 256,
     "batch_size": 32,
     "lr": 1e-4,
     "optimizer": "AdamW",
-    "num_workers": 8,
+    "num_workers": 0,
     "epochs": 5,
     "compile_mode": False,
 })
@@ -44,32 +44,48 @@ dataset = load_dataset("imdb")
 
 dataset
 
+from transformers import DistilBertTokenizerFast, DataCollatorWithPadding
+
 tokenizer = DistilBertTokenizerFast.from_pretrained(wandb.config.model_name)
 
-# Preprocessing function
 def tokenize(batch):
-    return tokenizer(batch['text'], padding="max_length", truncation=True, max_length=wandb.config.max_len)
+    return tokenizer(batch["text"], truncation=True, max_length=wandb.config.max_len)
 
-# Apply to train and test
-tokenized_train = dataset["train"].map(tokenize, batched=True)
-tokenized_test = dataset["test"].map(tokenize, batched=True)
+tokenized_train = dataset["train"].map(tokenize, batched=True, remove_columns=["text"])
+tokenized_test  = dataset["test"].map(tokenize, batched=True, remove_columns=["text"])
+
+data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
 tokenized_train.set_format("torch", columns=["input_ids", "attention_mask", "label"])
 tokenized_test.set_format("torch", columns=["input_ids", "attention_mask", "label"])
 
 from torch.utils.data import DataLoader
-
-# Check if CUDA is available to conditionally set pin_memory
 cuda_available = torch.cuda.is_available()
+collate_fn = DataCollatorWithPadding(tokenizer=tokenizer, return_tensors="pt")
 
-train_loader = DataLoader(tokenized_train, batch_size=wandb.config.batch_size, shuffle=True, num_workers=wandb.config.num_workers, pin_memory=cuda_available)
-test_loader = DataLoader(tokenized_test, batch_size=wandb.config.batch_size, num_workers=wandb.config.num_workers, pin_memory=cuda_available)
+train_loader = DataLoader(
+    tokenized_train,
+    batch_size=wandb.config.batch_size,
+    shuffle=True,
+    num_workers=wandb.config.num_workers,
+    pin_memory=cuda_available,
+    collate_fn=collate_fn,
+)
+
+test_loader = DataLoader(
+    tokenized_test,
+    batch_size=wandb.config.batch_size,
+    shuffle=False,
+    num_workers=wandb.config.num_workers,
+    pin_memory=cuda_available,
+    collate_fn=collate_fn,
+)
 
 batch = next(iter(train_loader))
 print(batch.keys())
 print(batch["input_ids"].shape)
 print(batch["attention_mask"].shape)
-print(batch["label"])
+print(batch["labels"])
 
 model = DistilBertForSequenceClassification.from_pretrained(
     wandb.config.model_name, num_labels=2
@@ -111,7 +127,7 @@ def train_one_epoch(model, loader, optimizer, device, log_every=200):
     for step, batch in enumerate(loader, start=1):
         input_ids = batch["input_ids"].to(device, non_blocking=True)
         attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-        labels = batch["label"].to(device, non_blocking=True)
+        labels = batch["labels"].to(device, non_blocking=True)
         if device.type == "cuda":
             torch.cuda.synchronize()
         data_time += time.time() - data_load_start_time
@@ -150,6 +166,94 @@ def train_one_epoch(model, loader, optimizer, device, log_every=200):
 
     return (epoch_loss / total), (correct / total), data_time, compute_time
 
+!pip install tensorboard
+
+import torch.profiler
+from torch.utils.tensorboard import SummaryWriter
+
+# Define a log directory for TensorBoard profiler traces
+PROF_LOG_DIR = './profiler_logs'
+
+# Define which epoch to profile
+PROFILE_EPOCH = 2 # You can change this to any epoch you want to profile
+
+# Create a SummaryWriter for TensorBoard
+writer = SummaryWriter(PROF_LOG_DIR)
+
+# Define the profiler scheduler and handler
+def profiler_schedule(wait, warmup, active, repeat):
+    # This scheduler runs the profiler for 'active' steps after 'warmup' steps
+    # and then repeats after 'wait' steps. 'repeat' specifies how many times this cycle runs.
+    # For profiling one full epoch, we'll collect data from the 'active' steps.
+    return torch.profiler.schedule(wait=wait, warmup=warmup, active=active, repeat=repeat)
+
+# The handler writes the profiler trace to the TensorBoard log directory
+trace_handler = torch.profiler.tensorboard_trace_handler(PROF_LOG_DIR, worker_name='worker0')
+
+print(f"Profiler traces will be saved to: {PROF_LOG_DIR}")
+print(f"Profiler will run during epoch: {PROFILE_EPOCH}")
+
+# for epoch in range(1, wandb.config.epochs + 1):
+num_epochs = wandb.config.epochs
+
+total_data_time_across_epochs = 0.0
+total_epoch_time_across_epochs = 0.0
+total_compute_time_across_epochs = 0.0 # Initialize total compute time
+
+for epoch in range(1, num_epochs + 1):
+    epoch_time_start = time.time()
+
+    if epoch == PROFILE_EPOCH:
+        # Activate profiler for the specified epoch
+        # Adjust wait, warmup, active, repeat based on your DataLoader and desired profiling window
+        # Here, we profile the entire epoch after 1 warmup step (first batch)
+        with torch.profiler.profile(
+            schedule=torch.profiler.schedule(
+                wait=1,
+                warmup=1,
+                active=len(train_loader) - 2,
+                repeat=1
+            ),
+            on_trace_ready=trace_handler,
+            with_stack=True, # Collect stack information for more details
+            profile_memory=True # Profile memory usage
+        ) as prof:
+            train_loss, train_acc, data_time, compute_time = train_one_epoch(
+                model, train_loader, optimizer, device, log_every=50
+            )
+            # Call prof.step() after each batch to advance the profiler's internal state
+            for _ in range(len(train_loader)): prof.step()
+    else:
+        train_loss, train_acc, data_time, compute_time = train_one_epoch(
+            model, train_loader, optimizer, device, log_every=50
+        )
+
+    test_acc = evaluate(model, test_loader, device)
+
+    epoch_time = time.time() - epoch_time_start
+
+    total_data_time_across_epochs += data_time
+    total_epoch_time_across_epochs += epoch_time
+    total_compute_time_across_epochs += compute_time
+
+    print(
+        f"Epoch {epoch:02d} | "
+        f"train loss {train_loss:.4f} acc {train_acc:.4f} | "
+        f"acc {test_acc:.4f} | "
+        f"time {epoch_time:.1f}s"
+    )
+
+    wandb.log({
+        "train/loss": train_loss,
+        "train/acc": train_acc,
+        "test/acc": test_acc,
+        "time/data_loading": data_time,
+        "time/compute": compute_time,
+        "time/epoch": epoch_time,
+    }, step=epoch)
+
+avg_epoch_time = total_epoch_time_across_epochs / num_epochs
+
 @torch.no_grad()
 def evaluate(model, loader, device):
     model.eval()
@@ -159,7 +263,7 @@ def evaluate(model, loader, device):
     for batch in loader:
         input_ids = batch["input_ids"].to(device, non_blocking=True)
         attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-        labels = batch["label"].to(device, non_blocking=True)
+        labels = batch["labels"].to(device, non_blocking=True)
 
         outputs = model(
             input_ids=input_ids,
@@ -177,7 +281,7 @@ def evaluate(model, loader, device):
 total_data_time = 0
 total_epoch_time = 0
 total_compute_time = 0
-for epoch in range(1, 6):
+for epoch in range(1, wandb.config.epochs + 1):
     epoch_time_start = time.time()
 
     train_loss, train_acc, data_time, compute_time = train_one_epoch(
@@ -206,15 +310,31 @@ for epoch in range(1, 6):
         "time/epoch": epoch_time,
     }, step=epoch)
 
-average_epoch_time = total_epoch_time / wandb.config.epochs
+avg_epoch_time = total_epoch_time / wandb.config.epochs
 
-wandb.log({
-    "time/total_data_time": total_data_time,
-    "time/average_epoch_time": average_epoch_time,
-    "time/total_compute_time": total_compute_time
-})
+wandb.summary["time/total_data_time"] = total_data_time
+wandb.summary["time/avg_epoch_time"] = avg_epoch_time
+wandb.summary["time/total_compute_time"] = total_compute_time
 
 wandb.finish()
+
+
+
+runs = api.runs("as7629-columbia-university/hpml-hw2")
+
+for run in runs:
+  print(run)
+
+api = wandb.Api()
+run = api.run("as7629-columbia-university/hpml-hw2/wg47j6qm")
+
+# Update the summary of the fetched run object
+run.summary["time/total_data_time"] = total_data_time
+run.summary["time/avg_epoch_time"] = average_epoch_time
+run.summary["time/total_compute_time"] = total_compute_time
+
+# Save the updated summary to W&B
+run.summary.update()
 
 # import wandb
 # import pandas as pd
@@ -256,22 +376,22 @@ wandb.finish()
 # # Plot num_workers vs time/avg_epoch_time
 # wandb.log({"num_workers_vs_avg_epoch_time_plot": wandb.plot.line(df, x="num_workers", y="time/avg_epoch_time", title="Num Workers vs Average Epoch Time")})
 
-# import wandb
-# import pandas as pd
-# import numpy as np
+import wandb
+import pandas as pd
+import numpy as np
 
-# api = wandb.Api()
-# runs = api.runs("as7629-columbia-university/hpml-hw2")
+api = wandb.Api()
+runs = api.runs("as7629-columbia-university/hpml-hw2")
 
-# rows = []
-# for r in runs:
-#     rows.append({
-#        "time/avg_epoch_time": r.summary.get("time/avg_epoch_time"),
-#        "time/total_data_time": r.summary.get("time/total_data_time"),
-#         "num_workers": r.config.get("num_workers")
-#     })
+rows = []
+for r in runs:
+    rows.append({
+       "time/avg_epoch_time": r.summary.get("time/avg_epoch_time"),
+       "time/total_data_time": r.summary.get("time/total_data_time"),
+        "num_workers": r.config.get("num_workers")
+    })
 
-# df = pd.DataFrame(rows).sort_values(["num_workers"])
+df = pd.DataFrame(rows).sort_values(["num_workers"])
 
 df
 
@@ -280,27 +400,27 @@ import os
 os.environ["WANDB_API_KEY"] = userdata.get('WANDB_API_KEY')
 wandb.init(project="hpml-hw2")
 
-# table = wandb.Table(dataframe=df)
-# wandb.run.name = "num_workers_comparison"
-# wandb.log({"num_workers_comparison": table})
+table = wandb.Table(dataframe=df)
+wandb.run.name = "num_workers_comparison"
+wandb.log({"num_workers_comparison": table})
 
-# wandb.log({"num_workers_vs_avg_epoch_time_plot": wandb.plot.line(table, x="num_workers", y="time/avg_epoch_time", title="Num Workers vs Average Epoch Time")})
+# wandb.log({"Num Workers vs Average Epoch Time": wandb.plot.line(table, x="num_workers", y="time/avg_epoch_time", title="Num Workers vs Average Epoch Time")})
 
-# import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 
-# fig, ax = plt.subplots(figsize=(10, 6))
+fig, ax = plt.subplots(figsize=(10, 6))
 
-# ax.plot(df['num_workers'], df['time/avg_epoch_time'], marker='o', linestyle='-')
-# ax.set_title('Num Workers vs Average Epoch Time')
-# ax.set_xlabel('Number of Workers')
-# ax.set_ylabel('Average Epoch Time (s)')
+ax.plot(df['num_workers'], df['time/avg_epoch_time'], marker='o', linestyle='-')
+ax.set_title('Num Workers vs Average Epoch Time')
+ax.set_xlabel('Number of Workers')
+ax.set_ylabel('Average Epoch Time (s)')
 
-# # used custom y-axis, otherwise scale is off
-# ax.set_ylim(min(df['time/avg_epoch_time']) - 5, max(df['time/avg_epoch_time']) + 5)
+# used custom y-axis, otherwise scale is off
+ax.set_ylim(min(df['time/avg_epoch_time']) - 1, max(df['time/avg_epoch_time']) + 1)
 
-# ax.grid(True)
+ax.grid(True)
 
-# wandb.log({"Num Workers vs Average Epoch Time": wandb.Image(fig)})
+wandb.log({"Num Workers vs Average Epoch Time": wandb.Image(fig)})
 
-# plt.show()
+plt.show()
 
