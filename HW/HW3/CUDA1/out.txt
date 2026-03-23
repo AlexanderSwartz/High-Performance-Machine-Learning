@@ -1,0 +1,9 @@
+Grid Dimensions: 2x2 
+Data dimensions: 64x64 
+Grid Dimensions: 2x2 
+Block Dimensions: 16x16 
+Footprint Dimensions: 32x32 
+Time: 0.000008 (sec), nFlops: 524288, GFlopsS: 64.677155
+
+
+TEST FAILED: number of errors:  3969, max rel error: 1.000000
