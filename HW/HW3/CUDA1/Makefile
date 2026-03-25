@@ -15,7 +15,7 @@ OPTIONS   :=  -O3
 #--maxrregcount=100 --ptxas-options -v 
 
 TAR_FILE_NAME  := YourNameCUDA1.tar
-EXECS :=  vecadd00 vecadd01 matmult00 matmult01
+EXECS :=  vecadd00 vecadd01 matmult00 matmult01 customvecadd
 all:$(EXECS)
 
 #######################################################################
@@ -65,3 +65,8 @@ matmultKernel01.o : matmultKernel01.cu matmultKernel.h
 
 matmult01 : matmult.cu  matmultKernel.h matmultKernel01.o timer.o
 	${NVCC} $< matmultKernel01.o -o $@ $(LIB) timer.o $(OPTIONS) -DFOOTPRINT_SIZE=32
+
+
+#######################################################################
+customvecadd: customVecadd.cpp
+	g++ -O3 customVecadd.cpp -o customvecadd -lm
