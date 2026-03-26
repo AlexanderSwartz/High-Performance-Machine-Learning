@@ -15,7 +15,7 @@ OPTIONS   :=  -O3
 #--maxrregcount=100 --ptxas-options -v 
 
 TAR_FILE_NAME  := YourNameCUDA1.tar
-EXECS :=  vecadd00 vecadd01 matmult00 matmult01 customvecadd
+EXECS :=  vecadd00 vecadd01 matmult00 matmult01 q1 q2
 all:$(EXECS)
 
 #######################################################################
@@ -68,5 +68,9 @@ matmult01 : matmult.cu  matmultKernel.h matmultKernel01.o timer.o
 
 
 #######################################################################
-customvecadd: customVecadd.cpp
-	g++ -O3 customVecadd.cpp -o customvecadd -lm
+## add timer dependency to q1
+q1: q1.cpp timer.o
+	${NVCC} q1.cpp timer.o -o $@ $(LIB) $(OPTIONS) -lm
+
+q2: q2.cu timer.o
+	${NVCC} q2.cu timer.o -o $@ $(LIB) $(OPTIONS) -lm
