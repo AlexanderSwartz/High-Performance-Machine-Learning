@@ -389,27 +389,17 @@ int main(int argc, char** argv) {
     printMatrixD(host_C, "host_C (convolution result)");
   }
 
-  // --- Run convolution on the GPU: grid.z = number of filters, each block computes a 16x16 tile ---
   DMatrix device_A = MakeDeviceMatrixD(host_A, true);
   DMatrix device_K = MakeDeviceMatrixD(host_K, true);
   DMatrix device_C = MakeDeviceMatrixD(host_C, false);
 
-  // NEW C2 SECTION **********************************************
-  DMatrix device_C_cudnn;
-  device_C_cudnn.width = W;
-  device_C_cudnn.height = H * K;
-  size_t C_size_bytes = device_C_cudnn.width * device_C_cudnn.height * sizeof(double);
-  cudaMalloc(&device_C_cudnn.elements, C_size_bytes);
-  
-  // Initialize with zeros just to be safe
-  cudaMemset(device_C_cudnn.elements, 0, C_size_bytes);
-
-  run_cudnn_convolution(device_A.elements, device_K.elements, device_C_cudnn.elements,
+  run_cudnn_convolution(device_A.elements, device_K.elements, device_C.elements,
                         channels, H_p, W_p, FH, FW, K);
 
+  // instead of overwriting host_C, copy to a new matrix (host_C_gpu) so we can compare to host_C results
   DMatrix host_C_gpu = MakeHostMatrixD(host_C.width, host_C.height);
   size_t sizeC = (size_t)host_C.width * host_C.height * sizeof(double);
-  cudaMemcpy(host_C_gpu.elements, device_C_cudnn.elements, sizeC, cudaMemcpyDeviceToHost);
+  cudaMemcpy(host_C_gpu.elements, device_C.elements, sizeC, cudaMemcpyDeviceToHost);
   
   // if (verbose == 1) {
   //   // Print first 8x8 of each filter slice for debugging to avoid flooding the console.
@@ -433,14 +423,12 @@ int main(int argc, char** argv) {
     printf("Checksum host: %.12f, gpu: %.12f, diff: %.12f\n", sum_host, sum_gpu, diff);
   }
 
-  // Free device memory
   cudaFree(device_A.elements);
   cudaFree(device_K.elements);
   cudaFree(device_C.elements);
-  cudaFree(device_C_cudnn.elements);
+  cudaFree(device_C.elements);
   free(host_C_gpu.elements);
 
-  // Free allocated memory.
   free(host_A.elements);
   free(host_K.elements);
   free(host_C.elements);
