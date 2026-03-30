@@ -15,12 +15,27 @@
 
 // Includes
 #include <stdio.h>
+#include <cmath>
+#include <cstdlib>
 #include "timer.h"
 #include "matmultKernel.h"
 
+#include <cudnn.h>
+#include <iostream>
+
 // Defines
-#define epsilon (float)1e-4
+#define EPSILON (float)1e-4
 #define verbose false
+
+// Reuse error checking from notes
+#define CUDNN_CALL(x) do { \
+    cudnnStatus_t ___s = (x); \
+    if (___s != CUDNN_STATUS_SUCCESS) { \
+        fprintf(stderr, "%s:%d ERROR: %s\n", __FILE__, \
+                __LINE__, cudnnGetErrorString(___s)); \
+        exit(-1); \
+    } \
+} while (0)
 
 Matrix MakeDeviceMatrix(Matrix M, bool copy){
   // Create a new matrix in device memory.
@@ -151,7 +166,7 @@ void checkResult(Matrix M) {
   for(int y=0; y<correct.height; y++) {
     for(int x=0; x<correct.width; x++) {
       float it = correct.elements[y*correct.width+x];
-      if(fabs(it - M.elements[y*M.width+x])> epsilon*it) {
+      if(fabs(it - M.elements[y*M.width+x])> EPSILON*it) {
         errCnt++;
         double error = fabs(it - M.elements[y*M.width+x])/it;
         if (error > maxerror) maxerror = error;
@@ -166,46 +181,118 @@ void checkResult(Matrix M) {
   free(correct.elements);
 }
 
-// Device kernel: compute valid 2D convolution for a filter bank
-// A is packed as [ch][H][W] with Matrix.width=W and Matrix.height=H*channels.
-// K is packed as [k][ch][FH][FW] with Matrix.width=FW and Matrix.height=KH*channels*kilters.
-// C is packed as [k][H][W] with Matrix.width=W and Matrix.height=H*k.
-__global__ void ConvKernel(DMatrix A, DMatrix K, DMatrix C,
-                           int channels, int H_p, int KH, int FW, int totalFilters) {
-  // compute global output coordinates
+// This function follows steps outlined by TA in # 226 on Ed
+// and borrows functions calls from lecture notes
+void run_cudnn_convolution(double* d_A, double* d_K, double* d_C,
+                           int channels, int H_p, int W_p, 
+                           int FH, int FW, int totalFilters) {
+    
+    // Step 0: Create Handle
+    cudnnHandle_t cudnn;
+    CUDNN_CALL(cudnnCreate(&cudnn));
 
-  // output coordinates (k,x,y) that this thread computes
-  int x = blockIdx.x * blockDim.x + threadIdx.x;
-  int y = blockIdx.y * blockDim.y + threadIdx.y;
-  int k = blockIdx.z;
+    // Step 1: Set Descriptors
+    // Input Descriptor (A)
+    cudnnTensorDescriptor_t A_desc;
+    CUDNN_CALL(cudnnCreateTensorDescriptor(&A_desc));
+    CUDNN_CALL(cudnnSetTensor4dDescriptor(A_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_DOUBLE, 1, channels, H_p, W_p));
 
-  
-  int H = C.height / totalFilters;
-  if (x >= C.width || y >= H) return;
+    cudnnFilterDescriptor_t K_desc;
+    CUDNN_CALL(cudnnCreateFilterDescriptor(&K_desc));
+    CUDNN_CALL(cudnnSetFilter4dDescriptor(K_desc, CUDNN_DATA_DOUBLE, CUDNN_TENSOR_NCHW, totalFilters, channels, FH, FW));
+        
+    // set padding to 0 since we already padded the input
+    int pad_h = 0; 
+    int pad_w = 0;
+    int stride_h = 1;
+    int stride_w = 1;
+    int dilation_h = 1;
+    int dilation_w = 1;
 
-  double acc = 0.0;
-  for (int ch = 0; ch < channels; ++ch) {
-    int a_base_row = ch * H_p;
-    int k_base_row = k * (KH * channels) + ch * KH;
-    for (int j = 0; j < KH; ++j) {
-      for (int i = 0; i < FW; ++i) {
-        // Uses I0[c, x + i, y + j], except j and i are in proper order
-        // a_base_row includes offset from ch
-        double a = A.elements[(a_base_row + y + j) * A.width + (x + i)];
-        double b = K.elements[(k_base_row + (KH - 1 - j)) * K.width + (FW - 1 - i)];
-        acc += a * b;
-      }
+    cudnnConvolutionDescriptor_t conv_desc;
+    CUDNN_CALL(cudnnCreateConvolutionDescriptor(&conv_desc));
+    CUDNN_CALL(cudnnSetConvolution2dDescriptor(conv_desc, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w, CUDNN_CONVOLUTION, CUDNN_DATA_DOUBLE));
+
+    // Check that cudNN's calculated output dimensions match expected dimensions
+    int N, C, H, W;
+    CUDNN_CALL(cudnnGetConvolution2dForwardOutputDim(conv_desc, A_desc, K_desc, &N, &C, &H, &W));
+
+    // Compute expected output dimensions using the same conv params
+    int expected_N = 1;
+    int expected_C = totalFilters;
+    int expected_H = H_p - FH + 1;
+    int expected_W = W_p - FW + 1;
+
+    if (N != expected_N || C != expected_C || H != expected_H || W != expected_W) {
+      fprintf(stderr, "cuDNN output dims mismatch: cudnn=(%d,%d,%d,%d) expected=(%d,%d,%d,%d)\n",
+          N, C, H, W,
+          expected_N, expected_C, expected_H, expected_W);
+      exit(-1);
     }
-  }
+    printf("cuDNN output dimensions: N=%d, C=%d, H=%d, W=%d\n", N, C, H, W);
 
-  // 2D Cmatrix is (w, H*k)
-  // Convert to 1D by multiplying row (k * H + y) by width (C.width) and adding x
-  C.elements[(k * H + y) * C.width + x] = acc;
+    cudnnTensorDescriptor_t out_desc;
+    CUDNN_CALL(cudnnCreateTensorDescriptor(&out_desc));
+    CUDNN_CALL(cudnnSetTensor4dDescriptor(out_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_DOUBLE, N, C, H, W));
+
+    // Step 2: Find Fastest Algorithm
+    // This runs a microbenchmark on different convolution algorithms and picks the fastest for this config
+    cudnnConvolutionFwdAlgoPerf_t perfResults;
+    int returnedAlgoCount = 0;
+
+    CUDNN_CALL(cudnnFindConvolutionForwardAlgorithm(
+      cudnn, A_desc, K_desc, conv_desc, out_desc,
+      1, &returnedAlgoCount, &perfResults
+    ));
+    
+    // to see which algorithm this enum maps to, look here: 
+    // https://docs.nvidia.com/deeplearning/cudnn/backend/latest/api/cudnn-cnn-library.html#id101:~:text=CUDNN_DATA_INT8x32-,Supported%20Algorithms,-For%20this%20function
+    printf("cuDNN chose algorithm: %d\n", perfResults.algo);
+
+    // Step 3: Query Workspace Size
+    size_t workspaceSizeInBytes = 0;
+    CUDNN_CALL(cudnnGetConvolutionForwardWorkspaceSize(
+        cudnn, A_desc, K_desc, conv_desc, out_desc, 
+        perfResults.algo, &workspaceSizeInBytes
+    ));
+
+    // Step 4: Allocate Workspace
+    void* d_workspace = nullptr;
+    if (workspaceSizeInBytes > 0) {
+        cudaMalloc(&d_workspace, workspaceSizeInBytes);
+    }
+
+    // Step 5: Run Convolution
+    // Output = alpha * Convolution + beta * Output
+    // Keep default: alpha=1 keeps output the same, beta=0 clears existing output before writing new values
+    double alpha = 1.0;
+    double beta = 0.0;
+
+    initialize_timer();
+    start_timer();
+
+    CUDNN_CALL(cudnnConvolutionForward(
+        cudnn, 
+        &alpha, A_desc, d_A, 
+        K_desc, d_K, 
+        conv_desc, perfResults.algo, 
+        d_workspace, workspaceSizeInBytes, 
+        &beta, out_desc, d_C
+    ));
+
+    cudaDeviceSynchronize(); 
+    stop_timer();
+    double cudnn_time = elapsed_time();
+    printf("Total time of cudnnConvolutionForward: %lf (sec)\n", cudnn_time);
+
+    if (d_workspace != nullptr) cudaFree(d_workspace);
+    CUDNN_CALL(cudnnDestroyTensorDescriptor(A_desc));
+    CUDNN_CALL(cudnnDestroyTensorDescriptor(out_desc));
+    CUDNN_CALL(cudnnDestroyFilterDescriptor(K_desc));
+    CUDNN_CALL(cudnnDestroyConvolutionDescriptor(conv_desc));
+    CUDNN_CALL(cudnnDestroy(cudnn));
 }
 
-//
-// main
-//
 int main(int argc, char** argv) {
   // A dimensions (before padding): C x H x W
   // A dimensions (after padding): C x H_p x W_p
@@ -219,10 +306,14 @@ int main(int argc, char** argv) {
   const int W_p = W + 2 * P;
   const int H_p = H + 2 * P;
 
+  // Use double-precision packed tensors for convolution
   DMatrix host_A = MakeHostMatrixD(W_p, H_p * channels);
+  // Pack kernels: width=FW, height=FH*channels*k
   DMatrix host_K = MakeHostMatrixD(FW, FH * channels * K);
+  // Outputs packed as height = H * k
   DMatrix host_C = MakeHostMatrixD(W, H * K);
 
+  // Zero the packed input A (padded buffer)
   size_t sizeA = (size_t)host_A.width * host_A.height;
   for (size_t i = 0; i < sizeA; ++i) host_A.elements[i] = 0.0;
 
@@ -249,6 +340,7 @@ int main(int argc, char** argv) {
       }
     }
   }
+
 
   if (verbose == 2) {
     // Print each channel of A and K separately (show padded A channel views)
@@ -297,30 +389,28 @@ int main(int argc, char** argv) {
     printMatrixD(host_C, "host_C (convolution result)");
   }
 
-  // Run convolution on the GPU: grid.z = number of filters, each block computes a 16x16 tile ---
+  // --- Run convolution on the GPU: grid.z = number of filters, each block computes a 16x16 tile ---
   DMatrix device_A = MakeDeviceMatrixD(host_A, true);
   DMatrix device_K = MakeDeviceMatrixD(host_K, true);
   DMatrix device_C = MakeDeviceMatrixD(host_C, false);
 
-  // Each block computes 16x16 piece of output
-  dim3 threadsPerBlock(16, 16, 1);
-  // Grid size is (W/16, H/16, K) rounded up
-  dim3 numBlocks((W + 15) / 16, (H + 15) / 16, K);
-  printf("Launching ConvKernel with grid (%d,%d,%d) and block (%d,%d,%d)\n",
-         numBlocks.x, numBlocks.y, numBlocks.z, threadsPerBlock.x, threadsPerBlock.y, threadsPerBlock.z);
+  // NEW C2 SECTION **********************************************
+  DMatrix device_C_cudnn;
+  device_C_cudnn.width = W;
+  device_C_cudnn.height = H * K;
+  size_t C_size_bytes = device_C_cudnn.width * device_C_cudnn.height * sizeof(double);
+  cudaMalloc(&device_C_cudnn.elements, C_size_bytes);
+  
+  // Initialize with zeros just to be safe
+  cudaMemset(device_C_cudnn.elements, 0, C_size_bytes);
 
-  initialize_timer();
-  start_timer();
-  ConvKernel<<<numBlocks, threadsPerBlock>>>(device_A, device_K, device_C, channels, H_p, FH, FW, K);
-  cudaDeviceSynchronize();
-  stop_timer();
-  double kernel_time = elapsed_time();
-  printf("ConvKernel time: %lf (sec)\n", kernel_time);
+  run_cudnn_convolution(device_A.elements, device_K.elements, device_C_cudnn.elements,
+                        channels, H_p, W_p, FH, FW, K);
 
   DMatrix host_C_gpu = MakeHostMatrixD(host_C.width, host_C.height);
   size_t sizeC = (size_t)host_C.width * host_C.height * sizeof(double);
-  cudaMemcpy(host_C_gpu.elements, device_C.elements, sizeC, cudaMemcpyDeviceToHost);
-
+  cudaMemcpy(host_C_gpu.elements, device_C_cudnn.elements, sizeC, cudaMemcpyDeviceToHost);
+  
   // if (verbose == 1) {
   //   // Print first 8x8 of each filter slice for debugging to avoid flooding the console.
   //   print3DDlim(host_C_gpu, K, H, W, 64, 64);
@@ -342,10 +432,12 @@ int main(int argc, char** argv) {
     printf("Checksum FAILED (diff > tol)\n");
     printf("Checksum host: %.12f, gpu: %.12f, diff: %.12f\n", sum_host, sum_gpu, diff);
   }
+
   // Free device memory
   cudaFree(device_A.elements);
   cudaFree(device_K.elements);
   cudaFree(device_C.elements);
+  cudaFree(device_C_cudnn.elements);
   free(host_C_gpu.elements);
 
   // Free allocated memory.

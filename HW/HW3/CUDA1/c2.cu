@@ -96,8 +96,8 @@ void printMatrixD(DMatrix M, const char* name) {
 
 // Print a 3D tensor stored as packed DMatrix with layout [K][H][W].
 // If maxRows/maxCols > 0, only print that many rows/cols per slice to avoid huge dumps.
-void print3DDlim(DMatrix M, int Kfilters, int H, int W, int maxRows, int maxCols) {
-  for (int k = 0; k < Kfilters; ++k) {
+void print3DDlim(DMatrix M, int kilters, int H, int W, int maxRows, int maxCols) {
+  for (int k = 0; k < kilters; ++k) {
     printf("\nSlice k=%d\n", k);
     double* slicePtr = &M.elements[(size_t)k * H * W];
     int rows = (maxRows > 0 && maxRows < H) ? maxRows : H;
@@ -177,7 +177,7 @@ void checkResult(Matrix M) {
 
 // Device kernel: compute valid 2D convolution for a filter bank
 // A is packed as [ch][H][W] with Matrix.width=W and Matrix.height=H*channels.
-// K is packed as [k][ch][FH][FW] with Matrix.width=FW and Matrix.height=FH*channels*Kfilters.
+// K is packed as [k][ch][FH][FW] with Matrix.width=FW and Matrix.height=FH*channels*kilters.
 // C is packed as [k][H][W] with Matrix.width=W and Matrix.height=H*k.
 __global__ void ConvKernel
 (DMatrix A, DMatrix K, DMatrix C,
@@ -199,10 +199,10 @@ __global__ void ConvKernel
   if (tid < KERNEL_ENTRIES) {
     int ch = tid / (FH * FW);
     int rem = tid % (FH * FW);
-    int ky = rem / FW;
-    int kx = rem % FW;
+    int j = rem / FW;
+    int i = rem % FW;
     int k_base_row = k * (FH * CHANNELS) + ch * FH;
-    sK[tid] = K.elements[(k_base_row + ky) * K.width + kx];
+    sK[tid] = K.elements[(k_base_row + j) * K.width + i];
   }
 
   // Each block computes a 16x16 tile of output, but needs an 18x18 tile of input due to the 3x3 kernel and padding.
@@ -275,10 +275,10 @@ __global__ void ConvKernel
 // main
 //
 int main(int argc, char** argv) {
-
-  // For convolution testing with channels and multiple filters.
-  // Dimensions: k x channels x H x W
-  // channels is a compile-time constant
+  // A dimensions (before padding): C x H x W
+  // A dimensions (after padding): C x H_p x W_p
+  // K dimensions: K x C x H x W
+  // C dimensions: K x H x W
   const int K = 64; // number of distinct filters
   const int H = 1024, W = 1024;
   const int FH = 3, FW = 3;
@@ -286,18 +286,14 @@ int main(int argc, char** argv) {
   const int W_p = W + 2 * P;
   const int H_p = H + 2 * P;
 
-  // Use double-precision packed tensors for convolution
   DMatrix host_A = MakeHostMatrixD(W_p, H_p * CHANNELS);
-  // Pack kernels: width=FW, height=FH*channels*k
   DMatrix host_K = MakeHostMatrixD(FW, FH * CHANNELS * K);
-  // Outputs packed as height = H * k
   DMatrix host_C = MakeHostMatrixD(W, H * K);
 
-  // Zero the packed input A (padded buffer)
   size_t sizeA = (size_t)host_A.width * host_A.height;
   for (size_t i = 0; i < sizeA; ++i) host_A.elements[i] = 0.0;
 
-  // Fill I[c,x,y] = c * (x + y) for original image and place into padded I0 at offset P
+  // Fill I[c,x,y] = c * (x + y), using offset of P for padding
   for (int ch = 0; ch < CHANNELS; ++ch) {
     for (int y = 0; y < H; ++y) {
       for (int x = 0; x < W; ++x) {
@@ -310,17 +306,16 @@ int main(int argc, char** argv) {
   }
 
   // Fill kernel K per filter and per channel using F[k,c,i,j] = (c + k) * (i + j)
-  for (int kf = 0; kf < K; ++kf) {
+  for (int k = 0; k < K; ++k) {
     for (int ch = 0; ch < CHANNELS; ++ch) {
-      int kbase = kf * (FH * CHANNELS) + ch * FH;
-      for (int ky = 0; ky < FH; ++ky) {
-        for (int kx = 0; kx < FW; ++kx) {
-          host_K.elements[(kbase + ky) * host_K.width + kx] = (double)((ch + kf) * (ky + kx));
+      int kbase = k * (FH * CHANNELS) + ch * FH;
+      for (int j = 0; j < FH; ++j) {
+        for (int i = 0; i < FW; ++i) {
+          host_K.elements[(kbase + j) * host_K.width + i] = (double)((ch + k) * (j + i));
         }
       }
     }
   }
-
 
   if (verbose == 2) {
     // Print each channel of A and K separately (show padded A channel views)
@@ -332,35 +327,35 @@ int main(int argc, char** argv) {
       sprintf(nameA, "host_A ch %d (%dx%d) padded", ch, H_p, W_p);
       printMatrixD(sliceA, nameA);
     }
-    for (int kf = 0; kf < K; ++kf) {
+    for (int k = 0; k < K; ++k) {
       for (int ch = 0; ch < CHANNELS; ++ch) {
         DMatrix sliceK = host_K;
         sliceK.height = FH;
-        sliceK.elements = &host_K.elements[(kf * (FH * CHANNELS) + ch * FH) * host_K.width];
+        sliceK.elements = &host_K.elements[(k * (FH * CHANNELS) + ch * FH) * host_K.width];
         char nameK[64];
-        sprintf(nameK, "host_K filt %d ch %d (%dx%d)", kf, ch, FH, FW);
+        sprintf(nameK, "host_K filt %d ch %d (%dx%d)", k, ch, FH, FW);
         printMatrixD(sliceK, nameK);
       }
     }
   }
 
   // Compute 2D convolution on the host with channel summation for each filter
-  for (int kf = 0; kf < K; ++kf) {
+  for (int k = 0; k < K; ++k) {
     for (int y = 0; y < H; ++y) {
       for (int x = 0; x < W; ++x) {
         double acc = 0.0;
         for (int ch = 0; ch < CHANNELS; ++ch) {
           int abase = ch * H_p;
-          int kbase = kf * (FH * CHANNELS) + ch * FH;
-          for (int ky = 0; ky < FH; ++ky) {
-            for (int kx = 0; kx < FW; ++kx) {
-              double a = host_A.elements[(abase + y + ky) * host_A.width + (x + kx)];
-              double b = host_K.elements[(kbase + (FH - 1 - ky)) * host_K.width + (FW - 1 - kx)];
+          int kbase = k * (FH * CHANNELS) + ch * FH;
+          for (int j = 0; j < FH; ++j) {
+            for (int i = 0; i < FW; ++i) {
+              double a = host_A.elements[(abase + y + j) * host_A.width + (x + i)];
+              double b = host_K.elements[(kbase + (FH - 1 - j)) * host_K.width + (FW - 1 - i)];
               acc += a * b;
             }
           }
         }
-        host_C.elements[(kf * H + y) * host_C.width + x] = acc;
+        host_C.elements[(k * H + y) * host_C.width + x] = acc;
       }
     }
   }
@@ -374,20 +369,21 @@ int main(int argc, char** argv) {
   DMatrix device_K = MakeDeviceMatrixD(host_K, true);
   DMatrix device_C = MakeDeviceMatrixD(host_C, false);
 
-  // Launch with 16x16 threads per block and grid.z = number of filters
+  // Each block computes 16x16 piece of output
   dim3 threadsPerBlock(16, 16, 1);
+  // Grid size is (W/16, H/16, K) rounded up
   dim3 numBlocks((W + 15) / 16, (H + 15) / 16, K);
   printf("Launching ConvKernel with grid (%d,%d,%d) and block (%d,%d,%d)\n",
          numBlocks.x, numBlocks.y, numBlocks.z, threadsPerBlock.x, threadsPerBlock.y, threadsPerBlock.z);
   // Launch the device kernel (ConvKernel defined in this file)
-    // Time the kernel: start timer, launch, synchronize, stop timer
-    initialize_timer();
-    start_timer();
-    ConvKernel<<<numBlocks, threadsPerBlock>>>(device_A, device_K, device_C, H_p, W_p, FH, FW, K);
-    cudaDeviceSynchronize();
-    stop_timer();
-    double kernel_time = elapsed_time();
-    printf("ConvKernel time: %lf (sec)\n", kernel_time);
+  // Time the kernel: start timer, launch, synchronize, stop timer
+  initialize_timer();
+  start_timer();
+  ConvKernel<<<numBlocks, threadsPerBlock>>>(device_A, device_K, device_C, H_p, W_p, FH, FW, K);
+  cudaDeviceSynchronize();
+  stop_timer();
+  double kernel_time = elapsed_time();
+  printf("ConvKernel time: %lf (sec)\n", kernel_time);
 
   // Copy result back to host and print/verify (double precision)
   DMatrix host_C_gpu = MakeHostMatrixD(host_C.width, host_C.height);
@@ -399,37 +395,23 @@ int main(int argc, char** argv) {
   //   print3DDlim(host_C_gpu, K, H, W, 64, 64);
   // }
 
-  // Simple verification against host result
-  int mismatches = 0;
-  for (size_t i = 0; i < (size_t)host_C.width * host_C.height; ++i) {
-    double h = host_C.elements[i];
-    double g = host_C_gpu.elements[i];
-    if (fabs(h - g) > 1e-6) {
-      ++mismatches;
+  // Compute checksums (sum of all elements) on host and GPU and compare
+    double sum_host = 0.0;
+    double sum_gpu = 0.0;
+    size_t total = (size_t)host_C.width * host_C.height;
+    for (size_t i = 0; i < total; ++i) {
+      sum_host += host_C.elements[i];
+      sum_gpu += host_C_gpu.elements[i];
     }
-  }
-  if (mismatches == 0) {
-    printf("GPU result matches host result\n");
-  } else {
-    printf("GPU result mismatches: %d\n", mismatches);
-  }
+    double diff = fabs(sum_host - sum_gpu);
+    double tol = 1e-12;
+    if (diff <= tol) {
+      printf("Checksum OK (within tolerance)\n");
+    } else {
+      printf("Checksum FAILED (diff > tol)\n");
+      printf("Checksum host: %.12f, gpu: %.12f, diff: %.12f\n", sum_host, sum_gpu, diff);
+    }
 
-  // Compute checksums (sum of all elements) on host and GPU copy and compare
-  double sum_host = 0.0;
-  double sum_gpu = 0.0;
-  size_t total = (size_t)host_C.width * host_C.height;
-  for (size_t i = 0; i < total; ++i) {
-    sum_host += host_C.elements[i];
-    sum_gpu += host_C_gpu.elements[i];
-  }
-  double diff = fabs(sum_host - sum_gpu);
-  printf("Checksum host: %.12f, gpu: %.12f, diff: %.12f\n", sum_host, sum_gpu, diff);
-  double tol = 1e-6 * fabs(sum_host) + 1e-12;
-  if (diff <= tol) {
-    printf("Checksum OK (within tolerance)\n");
-  } else {
-    printf("Checksum FAILED (diff > tol)\n");
-  }
   // Free device memory
   cudaFree(device_A.elements);
   cudaFree(device_K.elements);
