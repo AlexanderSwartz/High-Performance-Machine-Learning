@@ -1,31 +1,8 @@
-///
-/// matmult.cu
-/// For COMS E6998 Spring 2023
-/// Instructor: Parajit Dube and Kaoutar El Maghraoui
-/// Based on code from the CUDA Programming Guide
-/// Modified by Wim Bohm and David Newman
-/// Created: 2011-01-27
-/// Last Modified: 2011-02-19 DVN
-///
-/// Do not modify this file. The GTA will grade your
-/// code using the master copy of this file, not your
-/// copy, so any modifications you make will not play
-/// a role in the grading.
-///
-
-// Includes
 #include <stdio.h>
 #include <cmath>
 #include <cstdlib>
 #include "timer.h"
-#include "matmultKernel.h"
-
 #include <cudnn.h>
-#include <iostream>
-
-// Defines
-#define EPSILON (float)1e-4
-#define verbose false
 
 // Reuse error checking from notes
 #define CUDNN_CALL(x) do { \
@@ -36,29 +13,6 @@
         exit(-1); \
     } \
 } while (0)
-
-Matrix MakeDeviceMatrix(Matrix M, bool copy){
-  // Create a new matrix in device memory.
-  Matrix newDeviceMatrix;
-  newDeviceMatrix.width = M.width;
-  newDeviceMatrix.stride = M.width;
-  newDeviceMatrix.height = M.height;
-  size_t size = M.width * M.height * sizeof(float);
-  cudaMalloc((void**) &newDeviceMatrix.elements, size);
-  if (copy)
-    cudaMemcpy(newDeviceMatrix.elements, M.elements, size, cudaMemcpyHostToDevice);
-  return newDeviceMatrix;
-}
-
-// Create a matrix in host memory.
-Matrix MakeHostMatrix(int width, int height){
-  Matrix newHostMatrix;
-  newHostMatrix.width = width;
-  newHostMatrix.height = height;
-  size_t size = newHostMatrix.width * newHostMatrix.height * sizeof(float);
-  newHostMatrix.elements = (float*)malloc(size);
-  return newHostMatrix;
-}
 
 // Double-precision matrix descriptor for this convolution test only.
 typedef struct {
@@ -98,87 +52,6 @@ void printMatrixD(DMatrix M, const char* name) {
     }
     printf("\n");
   }
-}
-
-// Print a 3D tensor stored as packed DMatrix with layout [K][H][W].
-// If maxRows/maxCols > 0, only print that many rows/cols per slice to avoid huge dumps.
-void print3DDlim(DMatrix M, int kilters, int H, int W, int maxRows, int maxCols) {
-  for (int k = 0; k < kilters; ++k) {
-    printf("\nSlice k=%d\n", k);
-    double* slicePtr = &M.elements[(size_t)k * H * W];
-    int rows = (maxRows > 0 && maxRows < H) ? maxRows : H;
-    int cols = (maxCols > 0 && maxCols < W) ? maxCols : W;
-    for (int y = 0; y < rows; ++y) {
-      for (int x = 0; x < cols; ++x) {
-        printf("%f ", slicePtr[y * W + x]);
-      }
-      if (cols < W) printf(" ...");
-      printf("\n");
-    }
-    if (rows < H) printf("... (only first %d of %d rows shown)\n", rows, H);
-  }
-}
-
-// Print a matrix stored in host memory.
-void printMatrix(Matrix M, const char* name) {
-  printf("\n%s \n",name);
-  for(int y=0; y<M.height; y++){
-   for(int x=0; x<M.width; x++) {
-      printf("%f ", M.elements[y * M.width + x]);
-   }
-   printf("\n");
-  }
-}
-
-// Initialize dummy data in a matrix stored in host memory.
-void initMatrix(Matrix M, bool horizontal) {
-  for(int y=0; y<M.height; y++) {
-    for(int x=0; x<M.width; x++) {
-      M.elements[y*M.width+x] = (float)(horizontal?x:y);
-    }
-  }
-}
-
-// Check the specified matrix to be sure it is correct.
-// That is, make sure it is the result of multiplying the
-// dummy data we created earlier.
-void checkResult(Matrix M) {
-
-  Matrix correct = MakeHostMatrix(M.width, M.height);
-
-  for(int y=0; y<M.height; y++) {
-    for(int x=0; x<M.width; x++) {
-       correct.elements[y*correct.width+x] = (float)M.width*(float)x*y;
-    }
-  }
-
-  if(verbose){
-   // print correct
-   printMatrix(correct, "correct");
-
-   // print host_C
-   printMatrix(M, "result");
-  }
-
-
-  double maxerror = 0.0;
-  int errCnt = 0;
-  for(int y=0; y<correct.height; y++) {
-    for(int x=0; x<correct.width; x++) {
-      float it = correct.elements[y*correct.width+x];
-      if(fabs(it - M.elements[y*M.width+x])> EPSILON*it) {
-        errCnt++;
-        double error = fabs(it - M.elements[y*M.width+x])/it;
-        if (error > maxerror) maxerror = error;
-      }      
-    }
-  }
-
-  if(errCnt>0){
-    printf("\n\nTEST FAILED: number of errors:  %d, max rel error: %f\n", errCnt, maxerror);
-  }
-  
-  free(correct.elements);
 }
 
 // This function follows steps outlined by TA in # 226 on Ed
@@ -341,29 +214,6 @@ int main(int argc, char** argv) {
     }
   }
 
-
-  if (verbose == 2) {
-    // Print each channel of A and K separately (show padded A channel views)
-    for (int ch = 0; ch < channels; ++ch) {
-      DMatrix sliceA = host_A;
-      sliceA.height = H_p;
-      sliceA.elements = &host_A.elements[ch * H_p * host_A.width];
-      char nameA[64];
-      sprintf(nameA, "host_A ch %d (%dx%d) padded", ch, H_p, W_p);
-      printMatrixD(sliceA, nameA);
-    }
-    for (int k = 0; k < K; ++k) {
-      for (int ch = 0; ch < channels; ++ch) {
-        DMatrix sliceK = host_K;
-        sliceK.height = FH;
-        sliceK.elements = &host_K.elements[(k * (FH * channels) + ch * FH) * host_K.width];
-        char nameK[64];
-        sprintf(nameK, "host_K filt %d ch %d (%dx%d)", k, ch, FH, FW);
-        printMatrixD(sliceK, nameK);
-      }
-    }
-  }
-
   // Compute 2D convolution on the host with channel summation for each filter
   for (int k = 0; k < K; ++k) {
     for (int y = 0; y < H; ++y) {
@@ -385,10 +235,6 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (verbose == 2) {
-    printMatrixD(host_C, "host_C (convolution result)");
-  }
-
   DMatrix device_A = MakeDeviceMatrixD(host_A, true);
   DMatrix device_K = MakeDeviceMatrixD(host_K, true);
   DMatrix device_C = MakeDeviceMatrixD(host_C, false);
@@ -400,11 +246,24 @@ int main(int argc, char** argv) {
   DMatrix host_C_gpu = MakeHostMatrixD(host_C.width, host_C.height);
   size_t sizeC = (size_t)host_C.width * host_C.height * sizeof(double);
   cudaMemcpy(host_C_gpu.elements, device_C.elements, sizeC, cudaMemcpyDeviceToHost);
-  
-  // if (verbose == 1) {
-  //   // Print first 8x8 of each filter slice for debugging to avoid flooding the console.
-  //   print3DDlim(host_C_gpu, K, H, W, 64, 64);
-  // }
+
+  // Prints for debugging
+  // printf("\nFirst channel 8x8 of host_A");
+  // printSubMatrixD(host_A, 0, 0, 8, 8);
+  // printf("\nSecond channel 8x8 of host_A");
+  // printSubMatrixD(host_A, H_p, 0, 8, 8);
+
+  // printf("\nFirst filter, first channel 8x8 of host_K");
+  // printSubMatrixD(host_K, 0, 0, 3, 3);
+  // printf("\nFirst filter, second channel 8x8 of host_K");
+  // printSubMatrixD(host_K, FH, 0, 3, 3);
+  // printf("\nSecond filter, first channel 8x8 of host_K");
+  // printSubMatrixD(host_K, FH * channels, 0, 3, 3);
+
+  // printf("\nFirst filter 8x8 of host_C_gpu");
+  // printSubMatrixD(host_C_gpu, 0, 0, 8, 8);
+  // printf("\nSecond filter 8x8 of host_C_gpu");
+  // printSubMatrixD(host_C_gpu, H, 0, 8, 8);
 
   // Compute checksums (sum of all elements) on host and GPU and compare
   double sum_host = 0.0;
@@ -435,4 +294,3 @@ int main(int argc, char** argv) {
 
   return 0;
 }
-

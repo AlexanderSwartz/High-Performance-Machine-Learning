@@ -11,11 +11,11 @@ SDK_INSTALL_PATH := /usr/local/cuda
 NVCC=$(SDK_INSTALL_PATH)/bin/nvcc
 LIB       :=  -L$(SDK_INSTALL_PATH)/lib64 -L$(SDK_INSTALL_PATH)/samples/common/lib/linux/x86_64
 #INCLUDES  :=  -I$(SDK_INSTALL_PATH)/include -I$(SDK_INSTALL_PATH)/samples/common/inc
-OPTIONS   :=  -O3 
+OPTIONS   :=  -O3 -std=c++17
 #--maxrregcount=100 --ptxas-options -v 
 
 TAR_FILE_NAME  := YourNameCUDA1.tar
-EXECS :=  vecadd00 vecadd01 matmult00 matmult01 q1 q2
+EXECS :=  vecadd00 vecadd01 matmult00 matmult01 q1 q2 q3 c1 c2 c3
 all:$(EXECS)
 
 #######################################################################
@@ -68,9 +68,21 @@ matmult01 : matmult.cu  matmultKernel.h matmultKernel01.o timer.o
 
 
 #######################################################################
-## add timer dependency to q1
 q1: q1.cpp timer.o
 	${NVCC} q1.cpp timer.o -o $@ $(LIB) $(OPTIONS) -lm
 
 q2: q2.cu timer.o
 	${NVCC} q2.cu timer.o -o $@ $(LIB) $(OPTIONS) -lm
+
+q3: q3.cu timer.o
+	${NVCC} q3.cu timer.o -o $@ $(LIB) $(OPTIONS) -lm
+
+c1: c1.cu timer.o
+	${NVCC} c1.cu -o $@ $(LIB) timer.o $(OPTIONS)
+
+c2: c2.cu timer.o
+	${NVCC} c2.cu -o $@ $(LIB) timer.o $(OPTIONS)
+
+c3: c3.cu timer.o
+	${NVCC} c3.cu -o $@ $(LIB) timer.o $(OPTIONS) -lcudnn
+
