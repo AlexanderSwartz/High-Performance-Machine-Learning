@@ -22,7 +22,14 @@
 #define epsilon (float)1e-4
 #define verbose false
 // Max kernel entries (channels * FH * FW) for FH=3,FW=3,channels=3
+// Must be a compile-time constant to size shared memory array.
 #define KERNEL_ENTRIES 27
+#define CHANNELS 3
+#define BDIMX 16
+#define BDIMY 16
+#define PADDING 1
+#define TILE_W (BDIMX + 2 * PADDING) // 18
+#define TILE_H (BDIMY + 2 * PADDING) // 18
 
 Matrix MakeDeviceMatrix(Matrix M, bool copy){
   // Create a new matrix in device memory.
@@ -174,7 +181,7 @@ void checkResult(Matrix M) {
 // C is packed as [k][H][W] with Matrix.width=W and Matrix.height=H*k.
 __global__ void ConvKernel
 (DMatrix A, DMatrix K, DMatrix C,
-                           int channels, int H_p, int FH, int FW, int totalFilters) {
+                           int H_p, int W_p, int FH, int FW, int totalFilters) {
   // compute global output coordinates
 
   // output coordinates (k,x,y) that this thread computes
@@ -194,21 +201,65 @@ __global__ void ConvKernel
     int rem = tid % (FH * FW);
     int ky = rem / FW;
     int kx = rem % FW;
-    int k_base_row = k * (FH * channels) + ch * FH;
+    int k_base_row = k * (FH * CHANNELS) + ch * FH;
     sK[tid] = K.elements[(k_base_row + ky) * K.width + kx];
   }
+
+  // Each block computes a 16x16 tile of output, but needs an 18x18 tile of input due to the 3x3 kernel and padding.
+  int tile_size = TILE_W * TILE_H;
+   // Each thread loads one element of the 18x18 tile into shared memory, then jumps by the total number of threads in the block to load the next element until all 324 elements are loaded.
+  int stride = blockDim.x * blockDim.y;
+
+  // 18 width * 18 height * 3 channels = 972 elements
+  __shared__ double sA[TILE_W * TILE_H * CHANNELS];
+
+  // thread 0,0 block 0,0,0 loads sA[0], sA[256] (for channel 1)
+  // then loads sA[324], sA[580] (for channel 2)
+  // then loads sA[648], sA[904] (for channel 3)
+
+  // thread 15,15 block 0,0,0 loads sA[255] (for channel 1), sA[579] (for channel 2), sA[903] (for channel 3)
+  // then thread 0,0,1 loads sA[1], sA[325], sA[649] (second pixel of each channel), etc.
+
+  // block 0,0,0 loads same elements as block 0,0,1
+
+  for (int ch = 0; ch < CHANNELS; ++ch) {
+      for (int i = tid; i < tile_size; i += stride) {
+          // Convert 1D loop index 'i' to 2D tile coordinates (0-17)
+          int local_y = i / TILE_W;
+          int local_x = i % TILE_W;
+
+          // Find the top-left corner of the input area this block needs.
+          // blockIdx.x * 16 gives the starting pixel in the output,
+          // which corresponds to the same coordinate in the padded input A
+          // because the padding (P=1) offsets the actual data.
+          int global_y = blockIdx.y * BDIMY + local_y;
+          int global_x = blockIdx.x * BDIMX + local_x;
+            int sA_index = ch * tile_size + local_y * TILE_W + local_x;
+            // helpful prints for debugging
+            // if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 1 && threadIdx.x == 0 && threadIdx.y == 0) {
+            //   printf("thread(%d,%d,%d) block(%d,%d,%d) loading sA idx=%d ch=%d i=%d local=(%d,%d) global=(%d,%d)\n",
+            //      threadIdx.x, threadIdx.y, blockIdx.z, blockIdx.x, blockIdx.y, blockIdx.z, sA_index, ch, i, local_y, local_x, global_y, global_x);
+            // }
+            if (global_y < H_p && global_x < W_p) {
+              sA[sA_index] = A.elements[(ch * H_p + global_y) * A.width + global_x];
+            } else {
+              sA[sA_index] = 0.0;
+            }
+      }
+  }
+
   __syncthreads();
 
   if (x >= C.width || y >= H) return;
 
   double acc = 0.0;
-  for (int ch = 0; ch < channels; ++ch) {
+  for (int ch = 0; ch < CHANNELS; ++ch) {
     int a_base_row = ch * H_p;
     for (int j = 0; j < FH; ++j) {
       for (int i = 0; i < FW; ++i) {
         // Uses I0[c, x + i, y + j], except j and i are in proper order
         // a_base_row includes offset from ch
-        double a = A.elements[(a_base_row + y + j) * A.width + (x + i)];
+        double a = sA[ch * (TILE_W * TILE_H) + (threadIdx.y + j) * TILE_W + (threadIdx.x + i)];
         double b = sK[ch * (FH * FW) + (FH - 1 - j) * FW + (FW - 1 - i)];
         acc += a * b;
       }
@@ -227,7 +278,7 @@ int main(int argc, char** argv) {
 
   // For convolution testing with channels and multiple filters.
   // Dimensions: k x channels x H x W
-  const int channels = 3;
+  // channels is a compile-time constant
   const int K = 64; // number of distinct filters
   const int H = 1024, W = 1024;
   const int FH = 3, FW = 3;
@@ -236,9 +287,9 @@ int main(int argc, char** argv) {
   const int H_p = H + 2 * P;
 
   // Use double-precision packed tensors for convolution
-  DMatrix host_A = MakeHostMatrixD(W_p, H_p * channels);
+  DMatrix host_A = MakeHostMatrixD(W_p, H_p * CHANNELS);
   // Pack kernels: width=FW, height=FH*channels*k
-  DMatrix host_K = MakeHostMatrixD(FW, FH * channels * K);
+  DMatrix host_K = MakeHostMatrixD(FW, FH * CHANNELS * K);
   // Outputs packed as height = H * k
   DMatrix host_C = MakeHostMatrixD(W, H * K);
 
@@ -247,7 +298,7 @@ int main(int argc, char** argv) {
   for (size_t i = 0; i < sizeA; ++i) host_A.elements[i] = 0.0;
 
   // Fill I[c,x,y] = c * (x + y) for original image and place into padded I0 at offset P
-  for (int ch = 0; ch < channels; ++ch) {
+  for (int ch = 0; ch < CHANNELS; ++ch) {
     for (int y = 0; y < H; ++y) {
       for (int x = 0; x < W; ++x) {
         double v = (double)(ch * (x + y));
@@ -260,8 +311,8 @@ int main(int argc, char** argv) {
 
   // Fill kernel K per filter and per channel using F[k,c,i,j] = (c + k) * (i + j)
   for (int kf = 0; kf < K; ++kf) {
-    for (int ch = 0; ch < channels; ++ch) {
-      int kbase = kf * (FH * channels) + ch * FH;
+    for (int ch = 0; ch < CHANNELS; ++ch) {
+      int kbase = kf * (FH * CHANNELS) + ch * FH;
       for (int ky = 0; ky < FH; ++ky) {
         for (int kx = 0; kx < FW; ++kx) {
           host_K.elements[(kbase + ky) * host_K.width + kx] = (double)((ch + kf) * (ky + kx));
@@ -273,7 +324,7 @@ int main(int argc, char** argv) {
 
   if (verbose == 2) {
     // Print each channel of A and K separately (show padded A channel views)
-    for (int ch = 0; ch < channels; ++ch) {
+    for (int ch = 0; ch < CHANNELS; ++ch) {
       DMatrix sliceA = host_A;
       sliceA.height = H_p;
       sliceA.elements = &host_A.elements[ch * H_p * host_A.width];
@@ -282,10 +333,10 @@ int main(int argc, char** argv) {
       printMatrixD(sliceA, nameA);
     }
     for (int kf = 0; kf < K; ++kf) {
-      for (int ch = 0; ch < channels; ++ch) {
+      for (int ch = 0; ch < CHANNELS; ++ch) {
         DMatrix sliceK = host_K;
         sliceK.height = FH;
-        sliceK.elements = &host_K.elements[(kf * (FH * channels) + ch * FH) * host_K.width];
+        sliceK.elements = &host_K.elements[(kf * (FH * CHANNELS) + ch * FH) * host_K.width];
         char nameK[64];
         sprintf(nameK, "host_K filt %d ch %d (%dx%d)", kf, ch, FH, FW);
         printMatrixD(sliceK, nameK);
@@ -298,9 +349,9 @@ int main(int argc, char** argv) {
     for (int y = 0; y < H; ++y) {
       for (int x = 0; x < W; ++x) {
         double acc = 0.0;
-        for (int ch = 0; ch < channels; ++ch) {
+        for (int ch = 0; ch < CHANNELS; ++ch) {
           int abase = ch * H_p;
-          int kbase = kf * (FH * channels) + ch * FH;
+          int kbase = kf * (FH * CHANNELS) + ch * FH;
           for (int ky = 0; ky < FH; ++ky) {
             for (int kx = 0; kx < FW; ++kx) {
               double a = host_A.elements[(abase + y + ky) * host_A.width + (x + kx)];
@@ -332,7 +383,7 @@ int main(int argc, char** argv) {
     // Time the kernel: start timer, launch, synchronize, stop timer
     initialize_timer();
     start_timer();
-    ConvKernel<<<numBlocks, threadsPerBlock>>>(device_A, device_K, device_C, channels, H_p, FH, FW, K);
+    ConvKernel<<<numBlocks, threadsPerBlock>>>(device_A, device_K, device_C, H_p, W_p, FH, FW, K);
     cudaDeviceSynchronize();
     stop_timer();
     double kernel_time = elapsed_time();
