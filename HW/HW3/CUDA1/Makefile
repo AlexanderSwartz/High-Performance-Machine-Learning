@@ -25,6 +25,14 @@ all: part-a part-b part-c
 ### Kernel for adding two vectors without using coalesced memory
 ### Each thread adds ValuesPerThread elements, determined by user input in vecadd.cu
 #######################################################################
+
+# utility for measuring time before and after kernel calls
+timer.o : timer.cu timer.h
+	${NVCC} $< -c -o $@ $(OPTIONS)
+
+# Kernel for adding two vectors without using coaelsced memory
+# Each thread adds ValuesPerThread elements, determined by user input in vecadd.cu
+#######################################################################
 vecaddKernel00.o : vecaddKernel00.cu
 	${NVCC} $< -c -o $@ $(OPTIONS)
 
@@ -39,63 +47,55 @@ vecaddKernel01.o : vecaddKernel01.cu
 vecadd01 : vecadd.cu vecaddKernel.h vecaddKernel01.o timer.o
 	${NVCC} $< vecaddKernel01.o -o $@ $(LIB) timer.o $(OPTIONS)
 
-# matmult variants (if matmult.cu and kernels exist in this dir)
+
 #######################################################################
 ## Provided Kernel
-MAT_K00 := matmultKernel00.o
-MAT_K01 := matmultKernel01.o
-
-$(MAT_K00) : matmultKernel00.cu matmultKernel.h
+matmultKernel00.o : matmultKernel00.cu matmultKernel.h 
 	${NVCC} $< -c -o $@ $(OPTIONS)
 
-matmult00 : matmult.cu  matmultKernel.h $(MAT_K00) timer.o
-	${NVCC} $< $(MAT_K00) -o $@ $(LIB) timer.o $(OPTIONS)
-
+matmult00 : matmult.cu  matmultKernel.h matmultKernel00.o timer.o
+	${NVCC} $< matmultKernel00.o -o $@ $(LIB) timer.o $(OPTIONS)
 
 #######################################################################
 ## Expanded Kernel, notice that FOOTPRINT_SIZE is redefined (from 16 to 32)
-$(MAT_K01) : matmultKernel01.cu matmultKernel.h
+matmultKernel01.o : matmultKernel01.cu matmultKernel.h
 	${NVCC} $< -c -o $@ $(OPTIONS) -DFOOTPRINT_SIZE=32
 
-matmult01 : matmult.cu  matmultKernel.h $(MAT_K01) timer.o
-	${NVCC} $< $(MAT_K01) -o $@ $(LIB) timer.o $(OPTIONS) -DFOOTPRINT_SIZE=32
+matmult01 : matmult.cu  matmultKernel.h matmultKernel01.o timer.o
+	${NVCC} $< matmultKernel01.o -o $@ $(LIB) timer.o $(OPTIONS) -DFOOTPRINT_SIZE=32
 
-timer.o: timer.cu timer.h
-	$(NVCC) $< -c -o $@ $(OPTIONS)
 
 part-a: vecadd00 vecadd01 matmult00 matmult01
 
 ########################################################################
 # Part-B (compile files placed in ../Part-B) - build only if sources exist
 ########################################################################
-PB_DIR := ../Part-B
 part-b: ../Part-B/q1 ../Part-B/q2 ../Part-B/q3
 
 #######################################################################
 ../Part-B/q1: ../Part-B/q1.cpp timer.o
-	${NVCC} $< timer.o -o $@ $(LIB) $(OPTIONS) -lm
+	${NVCC} -I../Part-A $< timer.o -o $@ $(LIB) $(OPTIONS) -lm
 
 ../Part-B/q2: ../Part-B/q2.cu timer.o
-	${NVCC} $< timer.o -o $@ $(LIB) $(OPTIONS) -lm
+	${NVCC} -I../Part-A $< timer.o -o $@ $(LIB) $(OPTIONS) -lm
 
 ../Part-B/q3: ../Part-B/q3.cu timer.o
-	${NVCC} $< timer.o -o $@ $(LIB) $(OPTIONS) -lm
+	${NVCC} -I../Part-A $< timer.o -o $@ $(LIB) $(OPTIONS) -lm
 
 ########################################################################
 # Part-C (compile files placed in ../Part-C)
 ########################################################################
-PC_DIR := ../Part-C
 part-c: ../Part-C/c1 ../Part-C/c2 ../Part-C/c3
 
 #######################################################################
 ../Part-C/c1: ../Part-C/c1.cu timer.o
-	${NVCC} $< timer.o -o $@ $(LIB) $(OPTIONS)
+	${NVCC} -I../Part-A $< timer.o -o $@ $(LIB) $(OPTIONS)
 
 ../Part-C/c2: ../Part-C/c2.cu timer.o
-	${NVCC} $< timer.o -o $@ $(LIB) $(OPTIONS)
+	${NVCC} -I../Part-A $< timer.o -o $@ $(LIB) $(OPTIONS)
 
 ../Part-C/c3: ../Part-C/c3.cu timer.o
-	${NVCC} $< timer.o -o $@ $(LIB) $(OPTIONS) -lcudnn
+	${NVCC} -I../Part-A $< timer.o -o $@ $(LIB) $(OPTIONS) -lcudnn
 
 ########################################################################
 clean:
