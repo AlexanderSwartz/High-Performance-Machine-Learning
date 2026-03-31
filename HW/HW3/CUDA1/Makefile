@@ -9,44 +9,50 @@
 
 SDK_INSTALL_PATH := /usr/local/cuda
 NVCC=$(SDK_INSTALL_PATH)/bin/nvcc
-
 LIB := -L$(SDK_INSTALL_PATH)/lib64 -L$(SDK_INSTALL_PATH)/samples/common/lib/linux/x86_64
+#INCLUDES  :=  -I$(SDK_INSTALL_PATH)/include -I$(SDK_INSTALL_PATH)/samples/common/inc
 OPTIONS := -O3 -std=c++17
+#--maxrregcount=100 --ptxas-options -v 
 
-.PHONY: all part-a part-b part-c clean
+TAR_FILE_NAME  := as7629CUDA1.tar
+EXECS :=  vecadd00 vecadd01 matmult00 matmult01 q1 q2 q3 c1 c2 c3
+all:$(EXECS)
 
-all: part-a part-b part-c
-
-########################################################################
-# Part-A: build timer.o, vecadd variants, matmult variants
-########################################################################
-
-
-### Kernel for adding two vectors without using coalesced memory
-### Each thread adds ValuesPerThread elements, determined by user input in vecadd.cu
 #######################################################################
+clean:
+	rm -f $(EXECS) *.o
+
+#######################################################################
+tar:
+	tar -cvf $(TAR_FILE_NAME) Makefile *.h *.cu *.pdf *.txt
+#######################################################################
+
+########################################################################
+# Part-A
+########################################################################
 
 # utility for measuring time before and after kernel calls
 timer.o : timer.cu timer.h
 	${NVCC} $< -c -o $@ $(OPTIONS)
 
-# Kernel for adding two vectors without using coaelsced memory
+# Kernel for adding two vectors WITHOUT using coaelsced memory
 # Each thread adds ValuesPerThread elements, determined by user input in vecadd.cu
 #######################################################################
 vecaddKernel00.o : vecaddKernel00.cu
 	${NVCC} $< -c -o $@ $(OPTIONS)
 
+# Executable for vecadd with non-coalesced memory access
 vecadd00 : vecadd.cu vecaddKernel.h vecaddKernel00.o timer.o
 	${NVCC} $< vecaddKernel00.o -o $@ $(LIB) timer.o $(OPTIONS)
 
-
-#######################################################################
 vecaddKernel01.o : vecaddKernel01.cu
 	${NVCC} $< -c -o $@ $(OPTIONS)
 
+# Kernel for adding two vectors WITH using coaelsced memory
+# Accesses global memory with stride so that threads in the same warp access consecutive memory locations
+# Each thread adds ValuesPerThread elements, determined by user input in vecadd.cu
 vecadd01 : vecadd.cu vecaddKernel.h vecaddKernel01.o timer.o
 	${NVCC} $< vecaddKernel01.o -o $@ $(LIB) timer.o $(OPTIONS)
-
 
 #######################################################################
 ## Provided Kernel
@@ -64,40 +70,33 @@ matmultKernel01.o : matmultKernel01.cu matmultKernel.h
 matmult01 : matmult.cu  matmultKernel.h matmultKernel01.o timer.o
 	${NVCC} $< matmultKernel01.o -o $@ $(LIB) timer.o $(OPTIONS) -DFOOTPRINT_SIZE=32
 
-
-part-a: vecadd00 vecadd01 matmult00 matmult01
-
 ########################################################################
-# Part-B (compile files placed in ../Part-B) - build only if sources exist
+# Part-B
 ########################################################################
-part-b: ../Part-B/q1 ../Part-B/q2 ../Part-B/q3
 
-#######################################################################
+# Implements vector addition on CPU as baseline
 ../Part-B/q1: ../Part-B/q1.cpp timer.o
 	${NVCC} -I../Part-A $< timer.o -o $@ $(LIB) $(OPTIONS) -lm
 
+# Implements vector addition on GPU under 3 different grid and block configurations
 ../Part-B/q2: ../Part-B/q2.cu timer.o
 	${NVCC} -I../Part-A $< timer.o -o $@ $(LIB) $(OPTIONS) -lm
 
+# Same as q2 but uses unified memory
 ../Part-B/q3: ../Part-B/q3.cu timer.o
 	${NVCC} -I../Part-A $< timer.o -o $@ $(LIB) $(OPTIONS) -lm
 
 ########################################################################
-# Part-C (compile files placed in ../Part-C)
+# Part-C
 ########################################################################
-part-c: ../Part-C/c1 ../Part-C/c2 ../Part-C/c3
-
-#######################################################################
+# Implements convolution on GPU using a custom kernel
 ../Part-C/c1: ../Part-C/c1.cu timer.o
 	${NVCC} -I../Part-A $< timer.o -o $@ $(LIB) $(OPTIONS)
 
+# Implements convolution on GPU using a custom kernel that uses tiling and shared memory
 ../Part-C/c2: ../Part-C/c2.cu timer.o
 	${NVCC} -I../Part-A $< timer.o -o $@ $(LIB) $(OPTIONS)
 
+# Implements convolution on GPU using cuDNN library
 ../Part-C/c3: ../Part-C/c3.cu timer.o
 	${NVCC} -I../Part-A $< timer.o -o $@ $(LIB) $(OPTIONS) -lcudnn
-
-########################################################################
-clean:
-	rm -f vecadd00 vecadd01 matmult00 matmult01 vecaddKernel00.o vecaddKernel01.o $(MAT_K00) $(MAT_K01) timer.o
-	@echo "Cleaned Part-A artifacts"
