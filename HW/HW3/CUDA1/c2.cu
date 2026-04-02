@@ -84,45 +84,56 @@ __global__ void ConvKernel
   int tile_size = TILE_W * TILE_H;
    // Each thread loads one element of the 18x18 tile into shared memory, then jumps by the total number of threads in the block to load the next element until all 324 elements are loaded.
   int stride = blockDim.x * blockDim.y;
-
   // 18 width * 18 height * 3 channels = 972 elements
   __shared__ double sA[TILE_W * TILE_H * CHANNELS];
 
-  // thread 0,0 block 0,0,0 loads sA[0], sA[256] (for channel 1)
-  // then loads sA[324], sA[580] (for channel 2)
-  // then loads sA[648], sA[904] (for channel 3)
+  int source_offset_x = blockIdx.x * blockDim.x;
+  int source_offset_y = blockIdx.y * blockDim.y;
 
-  // thread 15,15 block 0,0,0 loads sA[255] (for channel 1), sA[579] (for channel 2), sA[903] (for channel 3)
-  // then thread 0,0,1 loads sA[1], sA[325], sA[649] (second pixel of each channel), etc.
+  int total_tile_elements = tile_size * CHANNELS; // 972
+  // index i can't map cleanly to channel because TILE_H (18) > blockDim.y (16)
+  for (int i = tid; i < total_tile_elements; i += stride) {
+    int ch = i / (tile_size);            
+    int rem = i % (tile_size);           
+    // positions within tile
+    int tile_y = rem / TILE_W;
+    int tile_x = rem % TILE_W;
 
-  // block 0,0,0 loads same elements as block 0,0,1
+    // convert tile coords to source padded A coords
+    int source_x = source_offset_x + tile_x;
+    int source_y = source_offset_y + tile_y;
 
-  for (int ch = 0; ch < CHANNELS; ++ch) {
-      for (int i = tid; i < tile_size; i += stride) {
-          // Convert 1D loop index 'i' to 2D tile coordinates (0-17)
-          int local_y = i / TILE_W;
-          int local_x = i % TILE_W;
+    // flatten same in c1, since A is (ch, H_p, W_p)
+    int source_idx = (ch * H_p + source_y) * A.width + source_x;
 
-          // Find the top-left corner of the input area this block needs.
-          // blockIdx.x * 16 gives the starting pixel in the output,
-          // which corresponds to the same coordinate in the padded input A
-          // because the padding (P=1) offsets the actual data.
-          int global_y = blockIdx.y * BDIMY + local_y;
-          int global_x = blockIdx.x * BDIMX + local_x;
-            int sA_index = ch * tile_size + local_y * TILE_W + local_x;
-            // helpful prints for debugging
-            // if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 1 && threadIdx.x == 0 && threadIdx.y == 0) {
-            //   printf("thread(%d,%d,%d) block(%d,%d,%d) loading sA idx=%d ch=%d i=%d local=(%d,%d) global=(%d,%d)\n",
-            //      threadIdx.x, threadIdx.y, blockIdx.z, blockIdx.x, blockIdx.y, blockIdx.z, sA_index, ch, i, local_y, local_x, global_y, global_x);
-            // }
-            if (global_y < H_p && global_x < W_p) {
-              sA[sA_index] = A.elements[(ch * H_p + global_y) * A.width + global_x];
-            } else {
-              sA[sA_index] = 0.0;
-            }
-      }
+    // optonal debug prints
+    // if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
+    //   printf("thread(%d,%d,%d) block(%d,%d,%d) loop i=%d reads from A.elements[%d] -> writes to sA[%d] (ch=%d tile=(%d,%d)\n",
+    //         threadIdx.x, threadIdx.y, blockIdx.z, blockIdx.x, blockIdx.y, blockIdx.z, i, source_idx, i, ch, tile_y, tile_x);
+    // }
+
+    // if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 1 && threadIdx.y == 0) {
+    //   printf("thread(%d,%d,%d) block(%d,%d,%d) loop i=%d reads from A.elements[%d] -> writes to sA[%d] (ch=%d tile=(%d,%d)\n",
+    //         threadIdx.x, threadIdx.y, blockIdx.z, blockIdx.x, blockIdx.y, blockIdx.z, i, source_idx, i, ch, tile_y, tile_x);
+    // }
+
+  // loop 1
+  // thread(0,0,0) block(0,0,0) loop i=0 reads from A.elements[0] -> writes to sA[0] (ch=0 tile=(0,0)
+  // thread(1,0,0) block(0,0,0) loop i=1 reads from A.elements[1] -> writes to sA[1] (ch=0 tile=(0,1)
+  // loop 2
+  // thread(0,0,0) block(0,0,0) loop i=256 reads from A.elements[14368] -> writes to sA[256] (ch=0 tile=(14,4)
+  // thread(1,0,0) block(0,0,0) loop i=257 reads from A.elements[14369] -> writes to sA[257] (ch=0 tile=(14,5)
+  // loop 3
+  // thread(0,0,0) block(0,0,0) loop i=512 reads from A.elements[1062944] -> writes to sA[512] (ch=1 tile=(10,8)
+  // thread(1,0,0) block(0,0,0) loop i=513 reads from A.elements[1062945] -> writes to sA[513] (ch=1 tile=(10,9)
+
+    if (source_y < H_p && source_x < W_p) {
+      sA[i] = A.elements[source_idx];
+    } else {
+      sA[i] = 0.0;
+    }
   }
-
+  
   __syncthreads();
 
   if (x >= C.width || y >= H) return;
