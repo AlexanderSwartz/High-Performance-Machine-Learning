@@ -14,7 +14,6 @@
     } \
 } while (0)
 
-// Double-precision matrix descriptor for this convolution test only.
 typedef struct {
   int width;
   int height;
@@ -55,7 +54,9 @@ void printMatrixD(DMatrix M, const char* name) {
 }
 
 // This function follows steps outlined by TA in # 226 on Ed
-// and borrows functions calls from lecture notes
+// As recommended by TA, uses cudnnFindConvolutionForwardAlgorithm since CUDNN CONVOLUTION FWD PREFER FASTEST
+// is not supported by the image Deep Learning VM with CUDA 11.3, M126 
+// This function also adapts code from lecture notes
 void run_cudnn_convolution(double* d_A, double* d_K, double* d_C,
                            int channels, int H_p, int W_p, 
                            int FH, int FW, int totalFilters) {
@@ -156,7 +157,8 @@ void run_cudnn_convolution(double* d_A, double* d_K, double* d_C,
     cudaDeviceSynchronize(); 
     stop_timer();
     double cudnn_time = elapsed_time();
-    printf("Total time of cudnnConvolutionForward: %lf (sec)\n", cudnn_time);
+    double cudnn_ms = cudnn_time * 1000.0;
+    printf("Total time of cudnnConvolutionForward: %.3f ms\n", cudnn_ms);
 
     if (d_workspace != nullptr) cudaFree(d_workspace);
     CUDNN_CALL(cudnnDestroyTensorDescriptor(A_desc));
@@ -172,21 +174,17 @@ int main(int argc, char** argv) {
   // K dimensions: K x C x H x W
   // C dimensions: K x H x W
   const int channels = 3;
-  const int K = 64; // number of distinct filters
+  const int K = 64;
   const int H = 1024, W = 1024;
   const int FH = 3, FW = 3;
-  const int P = 1; // padding
+  const int P = 1;
   const int W_p = W + 2 * P;
   const int H_p = H + 2 * P;
 
-  // Use double-precision packed tensors for convolution
   DMatrix host_A = MakeHostMatrixD(W_p, H_p * channels);
-  // Pack kernels: width=FW, height=FH*channels*k
   DMatrix host_K = MakeHostMatrixD(FW, FH * channels * K);
-  // Outputs packed as height = H * k
   DMatrix host_C = MakeHostMatrixD(W, H * K);
 
-  // Zero the packed input A (padded buffer)
   size_t sizeA = (size_t)host_A.width * host_A.height;
   for (size_t i = 0; i < sizeA; ++i) host_A.elements[i] = 0.0;
 
@@ -273,6 +271,7 @@ int main(int argc, char** argv) {
     sum_host += host_C.elements[i];
     sum_gpu += host_C_gpu.elements[i];
   }
+  printf("Checksum computed by GPU: %.12f\n", sum_gpu);
   double diff = fabs(sum_host - sum_gpu);
   double tol = 1e-12;
   if (diff <= tol) {

@@ -155,18 +155,15 @@ __global__ void ConvKernel
   C.elements[(k * H + y) * C.width + x] = acc;
 }
 
-//
-// main
-//
 int main(int argc, char** argv) {
   // A dimensions (before padding): C x H x W
   // A dimensions (after padding): C x H_p x W_p
   // K dimensions: K x C x H x W
   // C dimensions: K x H x W
-  const int K = 64; // number of distinct filters
+  const int K = 64;
   const int H = 1024, W = 1024;
   const int FH = 3, FW = 3;
-  const int P = 1; // padding
+  const int P = 1;
   const int W_p = W + 2 * P;
   const int H_p = H + 2 * P;
 
@@ -232,8 +229,7 @@ int main(int argc, char** argv) {
   dim3 numBlocks((W + 15) / 16, (H + 15) / 16, K);
   printf("Launching ConvKernel with grid (%d,%d,%d) and block (%d,%d,%d)\n",
          numBlocks.x, numBlocks.y, numBlocks.z, threadsPerBlock.x, threadsPerBlock.y, threadsPerBlock.z);
-  // Launch the device kernel (ConvKernel defined in this file)
-  // Time the kernel: start timer, launch, synchronize, stop timer
+
   initialize_timer();
   start_timer();
   ConvKernel<<<numBlocks, threadsPerBlock>>>(device_A, device_K, device_C, H_p, W_p, FH, FW, K);

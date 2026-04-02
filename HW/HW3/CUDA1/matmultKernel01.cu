@@ -3,7 +3,7 @@
 /// For COMS E6998 Spring 2023
 /// Instructor: Parajit Dube and Kaoutar El Maghraoui
 /// Based on code from the CUDA Programming Guide
-/// Modified block_col Wim Bohm and David Newman
+/// Modified by Wim Bohm and David Newman
 /// Created: 2011-01-27
 /// Last Modified: 2011-02-23 DVN
 ///
@@ -29,7 +29,6 @@ __global__ void MatMulKernel(Matrix A, Matrix B, Matrix C) {
     // Csub points to the top-left of the 32x32 output block
     Csub = &C.elements[C.stride * FOOTPRINT_SIZE * block_col + FOOTPRINT_SIZE * block_row];
 
-    // 1. ALLOCATE REGISTERS FOR THE 4 OUTPUTS
     // Cvalue00: top-left, Cvalue01: top-right, Cvalue10: bottom-left, Cvalue11: bottom-right
     float Cvalue00 = 0.0f;
     float Cvalue01 = 0.0f;
@@ -46,14 +45,11 @@ __global__ void MatMulKernel(Matrix A, Matrix B, Matrix C) {
         __shared__ float shared_A[FOOTPRINT_SIZE][FOOTPRINT_SIZE];
         __shared__ float shared_B[FOOTPRINT_SIZE][FOOTPRINT_SIZE];
 
-        // 2. COLLABORATIVE LOAD (Strided for Coalescing)
-        // Each 16x16 thread block loads 1 element for each of the 4 quadrants.
-        // Because 'thread_col' is contiguous for threads 0-15, these reads result in 
-        // clean 64-block_colte coalesced memory transactions!
-        shared_A[thread_row][thread_col]           = Asub[thread_row * A.stride + thread_col];                   // Top-Left quadrant
-        shared_A[thread_row][thread_col + BLOCK_SIZE]      = Asub[thread_row * A.stride + thread_col + BLOCK_SIZE];              // Top-Right quadrant
-        shared_A[thread_row + BLOCK_SIZE][thread_col]      = Asub[(thread_row + BLOCK_SIZE) * A.stride + thread_col];            // Bottom-Left quadrant
-        shared_A[thread_row + BLOCK_SIZE][thread_col + BLOCK_SIZE] = Asub[(thread_row + BLOCK_SIZE) * A.stride + thread_col + BLOCK_SIZE];       // Bottom-Right quadrant
+        // Each 16x16 thread block loads 1 element for each of the 4 quadrants (top-left, top-right, bottom-left, bottom-right)
+        shared_A[thread_row][thread_col]           = Asub[thread_row * A.stride + thread_col];
+        shared_A[thread_row][thread_col + BLOCK_SIZE]      = Asub[thread_row * A.stride + thread_col + BLOCK_SIZE];
+        shared_A[thread_row + BLOCK_SIZE][thread_col]      = Asub[(thread_row + BLOCK_SIZE) * A.stride + thread_col];
+        shared_A[thread_row + BLOCK_SIZE][thread_col + BLOCK_SIZE] = Asub[(thread_row + BLOCK_SIZE) * A.stride + thread_col + BLOCK_SIZE];
 
         shared_B[thread_row][thread_col]           = Bsub[thread_row * B.stride + thread_col];
         shared_B[thread_row][thread_col + BLOCK_SIZE]      = Bsub[thread_row * B.stride + thread_col + BLOCK_SIZE];
@@ -62,17 +58,13 @@ __global__ void MatMulKernel(Matrix A, Matrix B, Matrix C) {
         
         __syncthreads();
 
-        // 3. COMPUTE USING MAXIMUM REGISTER REUSE
         #pragma unroll
         for (int e = 0; e < FOOTPRINT_SIZE; ++e) {
-            
-            // Fetch 2 elements from A and 2 from B into extremely fast registers
             float a_top    = shared_A[thread_row][e];
             float a_bottom = shared_A[thread_row + BLOCK_SIZE][e];
             float b_left   = shared_B[e][thread_col];
             float b_right  = shared_B[e][thread_col + BLOCK_SIZE];
 
-            // Use those 4 registers to do 4 separate math operations!
             Cvalue00 += a_top * b_left;
             Cvalue01 += a_top * b_right;
             Cvalue10 += a_bottom * b_left;
@@ -82,7 +74,6 @@ __global__ void MatMulKernel(Matrix A, Matrix B, Matrix C) {
         __syncthreads();
     }
 
-    // 4. WRITE BACK TO GLOBAL MEMORY (Strided for Coalescing)
     // Debug: print which global C elements this thread (0,0) will write
     // if (thread_row == 0 && thread_col == 0 && block_col == 0 && block_row == 0) {
     //     int base_row = block_col * FOOTPRINT_SIZE;

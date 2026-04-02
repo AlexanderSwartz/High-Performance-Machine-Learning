@@ -60,8 +60,6 @@ void printSubMatrixD(DMatrix src, int startRow, int startCol, int rows, int cols
 // C is packed as [k][H][W] with Matrix.width=W and Matrix.height=H*k.
 __global__ void ConvKernel(DMatrix A, DMatrix K, DMatrix C,
                            int channels, int H_p, int KH, int FW, int totalFilters) {
-  // compute global output coordinates
-
   // output coordinates (k,x,y) that this thread computes
   int x = blockIdx.x * blockDim.x + threadIdx.x;
   int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -90,19 +88,16 @@ __global__ void ConvKernel(DMatrix A, DMatrix K, DMatrix C,
   C.elements[(k * H + y) * C.width + x] = acc;
 }
 
-//
-// main
-//
 int main(int argc, char** argv) {
   // A dimensions (before padding): C x H x W
   // A dimensions (after padding): C x H_p x W_p
   // K dimensions: K x C x H x W
   // C dimensions: K x H x W
   const int channels = 3;
-  const int K = 64; // number of distinct filters
+  const int K = 64;
   const int H = 1024, W = 1024;
   const int FH = 3, FW = 3;
-  const int P = 1; // padding
+  const int P = 1;
   const int W_p = W + 2 * P;
   const int H_p = H + 2 * P;
 
