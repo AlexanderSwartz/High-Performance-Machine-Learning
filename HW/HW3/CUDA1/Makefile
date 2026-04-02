@@ -15,8 +15,10 @@ OPTIONS := -O3 -std=c++17
 #--maxrregcount=100 --ptxas-options -v 
 
 TAR_FILE_NAME  := as7629CUDA1.tar
-EXECS :=  vecadd00 vecadd01 matmult00 matmult01 q1 q2 q3 c1 c2 c3
-all:$(EXECS)
+EXECS := vecadd00 vecadd01 matmult00 matmult01 \
+		 ../Part-B/q1 ../Part-B/q2 ../Part-B/q3 \
+		 ../Part-C/c1 ../Part-C/c2 ../Part-C/c3
+all: $(EXECS)
 
 #######################################################################
 clean:
@@ -45,12 +47,12 @@ vecaddKernel00.o : vecaddKernel00.cu
 vecadd00 : vecadd.cu vecaddKernel.h vecaddKernel00.o timer.o
 	${NVCC} $< vecaddKernel00.o -o $@ $(LIB) timer.o $(OPTIONS)
 
-vecaddKernel01.o : vecaddKernel01.cu
-	${NVCC} $< -c -o $@ $(OPTIONS)
-
 # Kernel for adding two vectors WITH using coaelsced memory
 # Accesses global memory with stride so that threads in the same warp access consecutive memory locations
 # Each thread adds ValuesPerThread elements, determined by user input in vecadd.cu
+vecaddKernel01.o : vecaddKernel01.cu
+	${NVCC} $< -c -o $@ $(OPTIONS)
+
 vecadd01 : vecadd.cu vecaddKernel.h vecaddKernel01.o timer.o
 	${NVCC} $< vecaddKernel01.o -o $@ $(LIB) timer.o $(OPTIONS)
 
@@ -64,6 +66,7 @@ matmult00 : matmult.cu  matmultKernel.h matmultKernel00.o timer.o
 
 #######################################################################
 ## Expanded Kernel, notice that FOOTPRINT_SIZE is redefined (from 16 to 32)
+## Uses thread coarsening so each thread computes 4 elements of output instead of 1
 matmultKernel01.o : matmultKernel01.cu matmultKernel.h
 	${NVCC} $< -c -o $@ $(OPTIONS) -DFOOTPRINT_SIZE=32
 
