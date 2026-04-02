@@ -54,7 +54,7 @@ void MatMul(const Matrix A, const Matrix B, Matrix C, int dimension){
   MatMulKernel<<<dimGrid, dimBlock>>>(device_A, device_B, device_C);
 
   // Synchronize to make sure everyone is done in the warmup.
-  cudaThreadSynchronize();
+  cudaDeviceSynchronize();
 
   // Set up timer
   initialize_timer();
@@ -65,7 +65,7 @@ void MatMul(const Matrix A, const Matrix B, Matrix C, int dimension){
   MatMulKernel<<<dimGrid, dimBlock>>>(device_A, device_B, device_C);
  
   // Synchronize to make sure everyone is done.
-  cudaThreadSynchronize() ;
+  cudaDeviceSynchronize() ;
 
   // Compute and report the timing results
 

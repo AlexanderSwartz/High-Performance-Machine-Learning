@@ -56,7 +56,7 @@ void printSubMatrixD(DMatrix src, int startRow, int startCol, int rows, int cols
 
 // Device kernel: compute valid 2D convolution for a filter bank
 // A is packed as [ch][H][W] with Matrix.width=W and Matrix.height=H*channels.
-// K is packed as [k][ch][FH][FW] with Matrix.width=FW and Matrix.height=KH*channels*kilters.
+// K is packed as [k][ch][FH][FW] with Matrix.width=FW and Matrix.height=KH*channels*filters.
 // C is packed as [k][H][W] with Matrix.width=W and Matrix.height=H*k.
 __global__ void ConvKernel(DMatrix A, DMatrix K, DMatrix C,
                            int channels, int H_p, int KH, int FW, int totalFilters) {
@@ -66,7 +66,6 @@ __global__ void ConvKernel(DMatrix A, DMatrix K, DMatrix C,
   int x = blockIdx.x * blockDim.x + threadIdx.x;
   int y = blockIdx.y * blockDim.y + threadIdx.y;
   int k = blockIdx.z;
-
   
   int H = C.height / totalFilters;
   if (x >= C.width || y >= H) return;
@@ -176,7 +175,8 @@ int main(int argc, char** argv) {
   cudaDeviceSynchronize();
   stop_timer();
   double kernel_time = elapsed_time();
-  printf("ConvKernel time: %lf (sec)\n", kernel_time);
+  double kernel_ms = kernel_time * 1000.0;
+  printf("ConvKernel time: %.3f ms\n", kernel_ms);
 
   // instead of overwriting host_C, copy to a new matrix (host_C_gpu) so we can compare to host_C results
   DMatrix host_C_gpu = MakeHostMatrixD(host_C.width, host_C.height);
@@ -209,6 +209,8 @@ int main(int argc, char** argv) {
     sum_host += host_C.elements[i];
     sum_gpu += host_C_gpu.elements[i];
   }
+  printf("Checksum computed by GPU: %.12f\n", sum_gpu);
+
   double diff = fabs(sum_host - sum_gpu);
   double tol = 1e-12;
   if (diff <= tol) {

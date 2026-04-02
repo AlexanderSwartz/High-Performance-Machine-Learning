@@ -1,31 +1,10 @@
-
-///
-/// vecadd.cu
-/// For COMS E6998 Spring 2023
-/// Instructor: Parajit Dube and Kaoutar El Maghraoui
-/// Based on code from the CUDA Programming Guide
-/// Modified by Wim Bohm and David Newman
-/// Created: 2011-02-03
-/// Last Modified: 2011-03-03 DVN
-///
-/// Add two Vectors A and B in C on GPU using
-/// a kernel defined according to vecAddKernel.h
-/// Students must not modify this file. The GTA
-/// will grade your submission using an unmodified
-/// copy of this file.
-/// 
-
-// Includes
 #include <stdio.h>
 #include <math.h>
 #include "timer.h"
 
-// Kernel prototype (defined below) and helper to run+time scenarios
 __global__ void AddVectors(const float* A, const float* B, float* C, int N);
-// run_scenario now reports warmup and timed kernel separately
 static void run_kernel(dim3 grid, dim3 block, const float* dA, const float* dB, float* dC, int N,
                          double* out_warmup, double* out_kernel);
-// Utility Functions
 void Cleanup(bool);
 void checkCUDAError(const char *msg);
 
@@ -36,14 +15,13 @@ float* d_A;
 float* d_B; 
 float* d_C; 
 
-// Execute one full scenario: HtoD, kernel (via run_scenario), DtoH, verify.
+// Execute one full scenario: HtoD, kernel, DtoH, verify.
 static void run_scenario(dim3 grid, dim3 block, int N, size_t size,
                                  double* out_warmup, double* out_kernel, int scenario_id)
 {
     cudaError_t error;
     run_kernel(grid, block, d_A, d_B, d_C, N, out_warmup, out_kernel);
 
-    // DtoH for verification
     error = cudaMemcpy(h_C, d_C, size, cudaMemcpyDeviceToHost);
     if (error != cudaSuccess) Cleanup(false);
 
@@ -56,7 +34,6 @@ static void run_scenario(dim3 grid, dim3 block, int N, size_t size,
     printf("Scenario %d verify %s\n", scenario_id, (i == N) ? "PASSED" : "FAILED");
 }
 
-// Host code performs setup and calls the kernel.
 int main(int argc, char** argv)
 {
     if (argc != 2)
@@ -111,11 +88,9 @@ int main(int argc, char** argv)
         run_scenario(dim3((unsigned int)blocksNeeded), dim3((unsigned int)threadsPerBlock), N, size,
             &t_warmup_arr[2], &t_kernel_arr[2], 3);
 
-    // Only report warmup and kernel times per scenario.
     printf("Scenario warmup times (s): 1=%.6f 2=%.6f 3=%.6f\n", t_warmup_arr[0], t_warmup_arr[1], t_warmup_arr[2]);
-    printf("Scenario kernel times (s): 1=%.6f 2=%.6f 3=%.6f\n", t_kernel_arr[0], t_kernel_arr[1], t_kernel_arr[2]);
+    printf("Scenario hot times (s): 1=%.6f 2=%.6f 3=%.6f\n", t_kernel_arr[0], t_kernel_arr[1], t_kernel_arr[2]);
 
-    // Use centralized Cleanup to free resources and exit.
     Cleanup(true);
 
 }
@@ -170,11 +145,9 @@ __global__ void AddVectors(const float* A, const float* B, float* C, int N)
     }
 }
 
-// Helper: launch kernel (with a warm-up), synchronize and return elapsed time in seconds.
 static void run_kernel(dim3 grid, dim3 block, const float* dA, const float* dB, float* dC, int N,
                          double* out_warmup, double* out_kernel)
 {
-    // Warm-up launch (timed)
     initialize_timer(); start_timer();
     AddVectors<<<grid, block>>>(dA, dB, dC, N);
     cudaDeviceSynchronize();
@@ -183,7 +156,6 @@ static void run_kernel(dim3 grid, dim3 block, const float* dA, const float* dB, 
     cudaError_t error = cudaGetLastError();
     if (error != cudaSuccess) Cleanup(false);
 
-    // Timed launch
     initialize_timer(); start_timer();
     AddVectors<<<grid, block>>>(dA, dB, dC, N);
     cudaDeviceSynchronize();

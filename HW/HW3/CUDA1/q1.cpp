@@ -29,7 +29,9 @@ int main(int argc, char **argv)
     sscanf(argv[1], "%llu", &K);
     N = (size_t)(K * 1000000ULL);
     size_t size = N * sizeof(float);
-    
+
+    double t_compute;
+
     float* h_A = (float *)malloc(size);
     float* h_B = (float *)malloc(size);
     float* h_C = (float *)malloc(size);
@@ -43,21 +45,17 @@ int main(int argc, char **argv)
 
     initialize_timer();
     start_timer();
-
     vecAdd(h_A, h_B, h_C, N);
-
-    // Compute elapsed time 
     stop_timer();
-    double time = elapsed_time();
-
-    printf( "Time: %lf (sec)\n", time);
+    t_compute = elapsed_time();
+    printf("Compute time (s): %.6f\n", t_compute);
 
     for (i = 0; i < N; ++i) {
         float val = h_C[i];
         if (fabs(val - N) > 1e-5)
             break;
     }
-    printf("Test %s \n", (i == N) ? "PASSED" : "FAILED");
+    printf("CPU verify %s\n", (i == N) ? "PASSED" : "FAILED");
 
     free(h_A);
     free(h_B);
