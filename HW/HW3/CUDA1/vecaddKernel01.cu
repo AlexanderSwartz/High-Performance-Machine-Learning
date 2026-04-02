@@ -8,24 +8,14 @@
 /// Last Modified: 2011-02-16 DVN
 ///
 /// This Kernel adds two Vectors A and B in C on GPU
-/// without using coalesced memory access.
-/// 
-
-// __global__ void AddVectors(const float* A, const float* B, float* C, int N)
-// {
-//     int t = threadIdx.x;
-//     int blockStart = blockIdx.x * blockDim.x * N;
-//     int totalSize = gridDim.x * blockDim.x * N;
-
-//     for (int k = 0; k < N; ++k) {
-//         int idx = blockStart + k * blockDim.x + t;
-//         if (idx < totalSize) C[idx] = A[idx] + B[idx];
-//     }
-// }
+/// WITH  coalesced memory access.
 
 __global__ void AddVectors(const float* A, const float* B, float* C, int N)
 {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
+    // stride by total number of threads
+    // iter 1: thread[0] computes C[0], thread[1] computes C[1]...
+    // iter 2: thread[0] computes C[stride], thread[1] computes C[stride+1]...
     int stride = blockDim.x * gridDim.x;
     int vectorLength = blockDim.x * gridDim.x * N;
 
